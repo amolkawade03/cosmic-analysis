@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.streamlit/secrets.toml
+exports/*.csv
+exports/*.json
+.DS_Store
+
+# Source transcripts are kept locally only — see PROJECT_ORIGIN.md.
+# Public reference lives in documentation/SOURCE_KEY_POINTS.md.
+transcripts/
