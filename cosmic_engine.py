@@ -132,25 +132,70 @@ def karana_info(moon: float, sun: float) -> Dict[str, Any]:
     return {"index": half, "name": name}
 
 
-def ritu_and_ayana(d: date) -> Tuple[str, str]:
-    md = d.month * 100 + d.day
-    ayana = "Uttarayana" if 1222 <= md or md < 621 else "Dakshinayana"
-    if 315 <= md < 515:
-        ritu = "Vasanta / Spring"
-    elif 515 <= md < 715:
-        ritu = "Grishma / Summer"
-    elif 715 <= md < 915:
-        ritu = "Varsha / Monsoon"
-    elif 915 <= md < 1115:
-        ritu = "Sharad / Autumn"
-    elif 1115 <= md or md < 115:
-        ritu = "Hemanta / Early winter"
-    else:
-        ritu = "Shishira / Late winter"
+def tropical_sun_longitude(d: date, loc: Location) -> float:
+    """Sun's tropical longitude at local noon. Used for astronomical ayana boundaries.
+
+    Per Sadhguru in the seed talk [00:37:24]: 'winter solstice in December to summer
+    solstice in June is called uttarayana.' That is the astronomical (tropical) frame.
+    """
+    noon = datetime.combine(d, time(12, 0), ZoneInfo(loc.timezone))
+    jd = to_jd_utc(noon)
+    return normalize(swe.calc_ut(jd, swe.SUN, swe.FLG_SWIEPH)[0][0])
+
+
+def sidereal_sun_longitude(d: date, loc: Location, ayanamsha: str = "Lahiri") -> float:
+    """Sun's sidereal longitude at local noon. Used for Sankranti / rashi labels."""
+    noon = datetime.combine(d, time(12, 0), ZoneInfo(loc.timezone))
+    jd = to_jd_utc(noon)
+    return sidereal_lon(jd, swe.SUN, ayanamsha)
+
+
+def ritu_and_ayana(d: date, loc: Optional[Location] = None, ayanamsha: str = "Lahiri") -> Tuple[str, str]:
+    """Astronomical solstice ayana + sidereal Sankranti ritu.
+
+    Ayana boundary: Sun's tropical longitude crossing 270° (December solstice)
+    and 90° (June solstice). Matches Sadhguru's framing in the seed talk
+    [00:37:24]: 'winter solstice in December to summer solstice in June is called
+    uttarayana.'
+
+    Ritu boundary: Sun's sidereal longitude in 60°-pairs of rashis. Matches the
+    traditional Hindu calendar's six-ritu / 12-Sankranti structure named in the
+    talk's broader context.
+    """
+    if loc is None:
+        loc = Location("UTC", 0.0, 0.0, "UTC")
+    trop = tropical_sun_longitude(d, loc)
+    sid = sidereal_sun_longitude(d, loc, ayanamsha)
+    ayana = "Uttarayana" if (270 <= trop or trop < 90) else "Dakshinayana"
+    rashi_idx = int(sid // 30)
+    ritu_table = [
+        (0, "Vasanta / Spring"),
+        (2, "Grishma / Summer"),
+        (4, "Varsha / Monsoon"),
+        (6, "Sharad / Autumn"),
+        (8, "Hemanta / Early winter"),
+        (10, "Shishira / Late winter"),
+    ]
+    ritu = "Vasanta / Spring"
+    for start_rashi, name in ritu_table:
+        if start_rashi <= rashi_idx < start_rashi + 2:
+            ritu = name
+            break
     return ritu, ayana
 
 
 def windows_for_day(sunrise: datetime, sunset: datetime) -> List[Dict[str, str]]:
+    """Daily transition windows.
+
+    Sandhya windows tightened to ±20 minutes per Sadhguru's stated definition
+    in the Isha 'Best time to practice yoga' article. Madhyahna Sandhya
+    (true noon ±20) added per the seed talk's four-sandhi list [00:33:13].
+
+    Rahu Kala / Yamaganda / Gulika Kala are computed and surfaced as
+    informational annotations only — the supplementary research found no
+    Sadhguru endorsement of these as 'avoid' windows. Scoring engine no
+    longer penalises overlap with them.
+    """
     day_len = sunset - sunrise
     segment = day_len / 8
     weekday = sunrise.strftime("%A")
@@ -160,9 +205,10 @@ def windows_for_day(sunrise: datetime, sunset: datetime) -> List[Dict[str, str]]
     noon = sunrise + day_len / 2
     data = [
         ("Brahma Muhurta", sunrise - timedelta(minutes=96), sunrise - timedelta(minutes=48)),
-        ("Sunrise Sandhya", sunrise - timedelta(minutes=24), sunrise + timedelta(minutes=24)),
+        ("Sunrise Sandhya", sunrise - timedelta(minutes=20), sunrise + timedelta(minutes=20)),
+        ("Madhyahna Sandhya", noon - timedelta(minutes=20), noon + timedelta(minutes=20)),
         ("Abhijit Muhurta", noon - timedelta(minutes=24), noon + timedelta(minutes=24)),
-        ("Sunset Sandhya", sunset - timedelta(minutes=24), sunset + timedelta(minutes=24)),
+        ("Sunset Sandhya", sunset - timedelta(minutes=20), sunset + timedelta(minutes=20)),
     ]
     for name, mapping in [("Rahu Kala", rahu), ("Yamaganda", yama), ("Gulika Kala", gulika)]:
         n = mapping[weekday]
@@ -175,7 +221,7 @@ def panchangam_for_date(d: date, loc: Location, ayanamsha: str = "Lahiri") -> Pa
     jd = to_jd_utc(sunrise)
     moon, sun = sidereal_lon(jd, swe.MOON, ayanamsha), sidereal_lon(jd, swe.SUN, ayanamsha)
     ti, nak = tithi_info(moon, sun), nakshatra_info(moon)
-    ritu, ayana = ritu_and_ayana(d)
+    ritu, ayana = ritu_and_ayana(d, loc, ayanamsha)
     return PanchangamDay(d.isoformat(), asdict(loc), sunrise.isoformat(), sunset.isoformat(), sunrise.strftime("%A"), ti, ti["paksha"], nak, yoga_info(moon, sun), karana_info(moon, sun), rashi(sun), rashi(moon), ayana, ritu, windows_for_day(sunrise, sunset))
 
 
@@ -224,9 +270,37 @@ def chandra_bala(day_moon_rashi_idx: int, janma_rashi_idx: int) -> Dict[str, Any
 
 
 def hora_lord(slot_start: datetime, sunrise: datetime) -> str:
+    """Fixed 60-minute hora (legacy). Prefer hora_lord_variable() for accuracy."""
     start = HORA_ORDER.index(VARA_LORD[sunrise.strftime("%A")])
     hour_num = max(0, int((slot_start - sunrise).total_seconds() // 3600))
     return HORA_ORDER[(start + hour_num) % 7]
+
+
+def hora_lord_variable(slot_start: datetime, sunrise: datetime, sunset: datetime) -> str:
+    """Variable-length day-hora and night-hora.
+
+    Day = sunrise to sunset, divided into 12 day-horas. Day-horas start with
+    the vara lord. Night = sunset to next sunrise, divided into 12 night-horas;
+    night-horas start with the 5th lord forward in HORA_ORDER from the vara
+    lord (standard Jyotisha rule).
+    """
+    if slot_start < sunrise:
+        prev_sunset = sunset - timedelta(days=1)
+        prev_vara = (sunrise - timedelta(days=1)).strftime("%A")
+        night_start_lord = HORA_ORDER[(HORA_ORDER.index(VARA_LORD[prev_vara]) + 4) % 7]
+        night_len = (sunrise - prev_sunset).total_seconds()
+        idx = int((slot_start - prev_sunset).total_seconds() / (night_len / 12))
+        return HORA_ORDER[(HORA_ORDER.index(night_start_lord) + idx) % 7]
+    if sunrise <= slot_start < sunset:
+        day_len = (sunset - sunrise).total_seconds()
+        idx = int((slot_start - sunrise).total_seconds() / (day_len / 12))
+        day_start_lord = VARA_LORD[sunrise.strftime("%A")]
+        return HORA_ORDER[(HORA_ORDER.index(day_start_lord) + idx) % 7]
+    next_sunrise = sunrise + timedelta(days=1)
+    night_len = (next_sunrise - sunset).total_seconds()
+    idx = int((slot_start - sunset).total_seconds() / (night_len / 12))
+    night_start_lord = HORA_ORDER[(HORA_ORDER.index(VARA_LORD[sunrise.strftime("%A")]) + 4) % 7]
+    return HORA_ORDER[(HORA_ORDER.index(night_start_lord) + idx) % 7]
 
 
 def window_overlap(slot_s: datetime, slot_e: datetime, windows: List[Dict[str, str]]) -> List[str]:
@@ -238,40 +312,79 @@ def window_overlap(slot_s: datetime, slot_e: datetime, windows: List[Dict[str, s
     return names
 
 
+# Friction windows: surfaced as informational annotations only, never penalised.
+# The supplementary research found no Sadhguru endorsement of these as "avoid"
+# windows; the seed talk explicitly criticises that fatalism at [00:13:58].
+FRICTION_WINDOWS = {"Rahu Kala", "Yamaganda", "Gulika Kala"}
+
+
 def score_slot(day: PanchangamDay, slot_start: datetime, minutes: int, activity: str, birth: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Positive-additive alignment score (anti-fatalist).
+
+    Score = sum of supportive contributions present in the window. There are
+    no negative penalties; flags for Rahu Kala / Yamaganda / Gulika Kala /
+    Ashtama Chandra are surfaced in 'notes' only. Tara Bala (nakshatra
+    matching) is excluded from scoring per Sadhguru's stated rejection of
+    nakshatra-as-predictor; Janma Nakshatra remains visible in the birth
+    chart output. Chandra Bala (Moon's transit relative to natal Moon) is
+    kept as a positive bonus only — Sadhguru endorses lunar gravity's
+    influence on the human system.
+
+    The five-band ladder is now: Strong Support / Supportive / Neutral /
+    Variable / Low Support. None are verdicts; all describe alignment.
+    """
     profile = ACTIVITY_PROFILES.get(activity, ACTIVITY_PROFILES["Sadhana / meditation"])
-    score, reasons, cautions = 50.0, [], []
+    score, reasons, notes = 0.0, [], []
     slot_end = slot_start + timedelta(minutes=minutes)
     overlaps = window_overlap(slot_start, slot_end, day.special_windows)
     for w in overlaps:
         if w in profile["prefer_windows"]:
             score += 12; reasons.append(f"Overlaps {w}")
-        if w in profile["avoid_windows"]:
-            score -= 20; cautions.append(f"Overlaps {w}")
+        if w in FRICTION_WINDOWS:
+            notes.append(f"Overlaps {w} (friction window — awareness, not avoidance)")
     if day.nakshatra["name"] in profile["boost_nak"]:
-        score += 10; reasons.append(f"Supportive nakshatra: {day.nakshatra['name']}")
-    h = hora_lord(slot_start, datetime.fromisoformat(day.sunrise))
+        score += 8; reasons.append(f"Aligned nakshatra: {day.nakshatra['name']}")
+    sunrise_dt = datetime.fromisoformat(day.sunrise)
+    sunset_dt = datetime.fromisoformat(day.sunset)
+    h = hora_lord_variable(slot_start, sunrise_dt, sunset_dt)
     if activity == "Investment / finance" and h in {"Jupiter", "Venus", "Mercury"}:
-        score += 8; reasons.append(f"Supportive hora: {h}")
+        score += 6; reasons.append(f"Aligned hora: {h}")
     if activity == "Deep work / study" and h in {"Mercury", "Jupiter", "Sun"}:
-        score += 8; reasons.append(f"Supportive hora: {h}")
+        score += 6; reasons.append(f"Aligned hora: {h}")
     if activity == "Sadhana / meditation" and h in {"Jupiter", "Moon", "Sun"}:
-        score += 6; reasons.append(f"Supportive hora: {h}")
+        score += 6; reasons.append(f"Aligned hora: {h}")
     personal: Dict[str, Any] = {}
     if birth:
-        tb = tara_bala(day.nakshatra["index"], birth["janma_nakshatra"]["index"])
         cb = chandra_bala(RASHIS.index(day.moon_rashi) + 1, birth["janma_rashi_index"])
-        personal = {"tara_bala": tb, "chandra_bala": cb}
-        w = profile["weight_personal"]
-        score += (8 if tb["supportive"] else -7) * w
-        score += (8 if cb["supportive"] else -8) * w
+        tb = tara_bala(day.nakshatra["index"], birth["janma_nakshatra"]["index"])
+        personal = {"chandra_bala": cb, "tara_bala": tb}
+        if cb["supportive"]:
+            score += 6; reasons.append("Chandra Bala aligned")
         if cb["ashtama_chandra"]:
-            score -= 12 * w; cautions.append("Ashtama Chandra caution")
-        reasons += [x for x in ["Tara Bala supportive" if tb["supportive"] else "", "Chandra Bala supportive" if cb["supportive"] else ""] if x]
-        cautions += [x for x in ["Tara Bala not ideal" if not tb["supportive"] else "", "Chandra Bala not ideal" if not cb["supportive"] else ""] if x]
-    score = max(0, min(100, round(score, 1)))
-    band = "Excellent" if score >= 85 else "Strong" if score >= 72 else "Usable" if score >= 58 else "Caution" if score >= 42 else "Avoid"
-    return {"start": slot_start.isoformat(), "end": slot_end.isoformat(), "score": score, "band": band, "hora_lord": h, "overlaps": overlaps, "reasons": reasons[:6], "cautions": cautions[:6], "personal": personal}
+            notes.append("Ashtama Chandra (Moon 8th from natal — informational, not a verdict)")
+    score = max(0.0, min(50.0, round(score, 1)))
+    if score >= 32:
+        band = "Strong Support"
+    elif score >= 22:
+        band = "Supportive"
+    elif score >= 12:
+        band = "Neutral"
+    elif score > 0:
+        band = "Variable"
+    else:
+        band = "Low Support"
+    return {
+        "start": slot_start.isoformat(),
+        "end": slot_end.isoformat(),
+        "score": score,
+        "band": band,
+        "hora_lord": h,
+        "overlaps": overlaps,
+        "reasons": reasons[:8],
+        "notes": notes[:8],
+        "cautions": [],  # preserved for backward compat with tests; new code uses "notes"
+        "personal": personal,
+    }
 
 
 def rank_muhurta_windows(d: date, loc: Location, activity: str, birth: Optional[Dict[str, Any]] = None, ayanamsha: str = "Lahiri", slot_minutes: int = 30, top_n: int = 12) -> Dict[str, Any]:
