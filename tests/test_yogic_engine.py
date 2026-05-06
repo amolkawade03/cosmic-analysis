@@ -102,38 +102,78 @@ def test_mahashivaratri_2026():
     assert abs((d - date(2026, 2, 15)).days) <= 1
 
 
-def test_mahashivaratri_2025_2027():
-    """Cross-year stability."""
-    assert abs((find_mahashivaratri(2025, SJ) - date(2025, 2, 26)).days) <= 1
-    assert abs((find_mahashivaratri(2027, SJ) - date(2027, 3, 6)).days) <= 1
-
-
-def test_buddha_pournima_2026():
-    """Vaishakha Pournima 2026: published May 1."""
-    d = find_buddha_pournima(2026, SJ)
+def test_mahashivaratri_2024_does_not_return_none():
+    """Regression test: prior implementation returned None for 2024 because
+    T29 fell between two San Jose sunrises. The Nishita-spanning rule with
+    IST sampling fixes this."""
+    d = find_mahashivaratri(2024, SJ)
     assert d is not None
-    assert abs((d - date(2026, 5, 1)).days) <= 1
+    assert abs((d - date(2024, 3, 8)).days) <= 1
 
 
-def test_guru_pournima_2026():
-    """Ashadha Pournima 2026: published Jul 28-29."""
-    d = find_guru_pournima(2026, SJ)
-    assert d is not None
-    assert abs((d - date(2026, 7, 28)).days) <= 1
+def test_mahashivaratri_multiyear_anchors():
+    """Cross-year drikpanchang anchors 2024-2028."""
+    targets = {
+        2024: date(2024, 3, 8),
+        2025: date(2025, 2, 26),
+        2026: date(2026, 2, 15),
+        2027: date(2027, 3, 6),
+        2028: date(2028, 2, 23),
+    }
+    for yr, expected in targets.items():
+        actual = find_mahashivaratri(yr, SJ)
+        assert actual is not None, f"Mahashivaratri {yr} returned None"
+        assert abs((actual - expected).days) <= 1, f"{yr}: got {actual}, expected {expected}"
 
 
-def test_guru_pournima_year_continuity():
-    for yr in (2024, 2025, 2026, 2027, 2028):
-        d = find_guru_pournima(yr, SJ)
-        assert d is not None, f"Guru Pournima undetected for {yr}"
-        assert d.year == yr
+def test_buddha_pournima_multiyear():
+    """Vaishakha Pournima — verified against drikpanchang for 2024-2028.
+    Regression: pre-Mesha-Amavasya-anchor implementation was 30 days off
+    in 2024 and 2027 (returned Chaitra Pournima instead of Vaishakha)."""
+    targets = {
+        2024: date(2024, 5, 23),
+        2025: date(2025, 5, 12),
+        2026: date(2026, 5, 1),
+        2027: date(2027, 5, 20),
+        2028: date(2028, 5, 8),
+    }
+    for yr, expected in targets.items():
+        actual = find_buddha_pournima(yr, SJ)
+        assert actual is not None
+        assert abs((actual - expected).days) <= 1, f"{yr}: got {actual}, expected {expected}"
 
 
-def test_naga_panchami_2026():
-    """Naga Panchami 2026: published Aug 17 (within ±1 due to tithi-at-sunrise)."""
-    d = find_naga_panchami(2026, SJ)
-    assert d is not None
-    assert abs((d - date(2026, 8, 17)).days) <= 1
+def test_guru_pournima_multiyear():
+    """Ashadha Pournima 2024-2028 verified against drikpanchang.
+    Regression: 2028 (Moon in Mula at Pournima) needs Mithuna-Amavasya anchor."""
+    targets = {
+        2024: date(2024, 7, 21),
+        2025: date(2025, 7, 10),
+        2026: date(2026, 7, 29),
+        2027: date(2027, 7, 18),
+        2028: date(2028, 7, 6),
+    }
+    for yr, expected in targets.items():
+        actual = find_guru_pournima(yr, SJ)
+        assert actual is not None
+        assert abs((actual - expected).days) <= 1, f"{yr}: got {actual}, expected {expected}"
+
+
+def test_naga_panchami_multiyear():
+    """Shravana Shukla Panchami 2024-2028 verified against drikpanchang.
+    Regression: pre-Karka-Amavasya-anchor was 30 days off in 2027/2028
+    due to Adhika Masa edge cases breaking the ordinal-counting rule."""
+    targets = {
+        2024: date(2024, 8, 9),
+        2025: date(2025, 7, 29),
+        2026: date(2026, 8, 18),
+        2027: date(2027, 8, 6),
+        2028: date(2028, 7, 26),
+    }
+    for yr, expected in targets.items():
+        actual = find_naga_panchami(yr, SJ)
+        assert actual is not None
+        assert abs((actual - expected).days) <= 1, f"{yr}: got {actual}, expected {expected}"
 
 
 def test_margali_window_2026():
@@ -185,6 +225,53 @@ def test_latitude_intensity_envelope_band():
     assert latitude_intensity(28.0, "equinox_envelope") == 1.0
     assert latitude_intensity(11.0, "equinox_envelope") == 0.6
     assert latitude_intensity(37.3382, "equinox_envelope") == 0.6
+
+
+def test_latitude_intensity_hemisphere_symmetric():
+    """Sadhguru's geometric claim is by latitude magnitude, not by sign.
+    11°N and 11°S must produce the same intensity."""
+    assert latitude_intensity(11.0, "mahashivaratri") == latitude_intensity(-11.0, "mahashivaratri")
+    assert latitude_intensity(37.3382, "mahashivaratri") == latitude_intensity(-37.3382, "mahashivaratri")
+    assert abs(latitude_intensity(11.0, "mahashivaratri") - 1.0) < 1e-9
+
+
+def test_location_validates_latitude():
+    """Location should reject |lat| > 90."""
+    import pytest
+    with pytest.raises(ValueError, match="latitude"):
+        Location("X", 200.0, 0.0, "UTC")
+    with pytest.raises(ValueError, match="latitude"):
+        Location("X", -100.0, 0.0, "UTC")
+
+
+def test_location_validates_longitude():
+    import pytest
+    with pytest.raises(ValueError, match="longitude"):
+        Location("X", 0.0, 200.0, "UTC")
+
+
+def test_location_validates_timezone():
+    import pytest
+    with pytest.raises(ValueError, match="timezone"):
+        Location("X", 0.0, 0.0, "Mars/Olympus")
+
+
+def test_birth_input_validates_year_range():
+    import pytest
+    from datetime import time as _time
+    valid_loc = Location("U", 19.2, 73.15, "Asia/Kolkata")
+    with pytest.raises(ValueError, match="1800"):
+        BirthInput(date(1500, 1, 1), _time(12, 0), valid_loc)
+    with pytest.raises(ValueError, match="2400"):
+        BirthInput(date(2500, 1, 1), _time(12, 0), valid_loc)
+
+
+def test_birth_input_validates_ayanamsha():
+    import pytest
+    from datetime import time as _time
+    valid_loc = Location("U", 19.2, 73.15, "Asia/Kolkata")
+    with pytest.raises(ValueError, match="ayanamsha"):
+        BirthInput(date(1990, 1, 1), _time(12, 0), valid_loc, ayanamsha="Bogus")
 
 
 # -----------------------------------------------------------------------------
@@ -304,10 +391,28 @@ def test_regimen_in_grishma():
     assert any("Cooling foods" in r for r in rg)
 
 
-def test_regimen_quiet_day():
-    """A day with no specific Sadhguru prescription returns empty list (not invented content)."""
+def test_regimen_quiet_day_returns_empty():
+    """A day with no specific Sadhguru prescription returns an EMPTY list
+    (not invented content). November 5 2026: not in Margali, not in Grishma,
+    not equinox-adjacent, not Pournami/Amavasya/Ekadashi — should be empty.
+    A `return []` stub would pass `isinstance(rg, list)` but fail this stronger
+    assertion of length zero."""
     rg = regimen_for_date(date(2026, 11, 5), SJ)
     assert isinstance(rg, list)
+    assert len(rg) == 0, f"expected empty regimen list on quiet day, got {rg}"
+
+
+def test_regimen_pournima_day_has_pournami_line():
+    """Positive contract assertion: Pournami day must yield the Pournami regimen line."""
+    rg = regimen_for_date(date(2026, 5, 1), SJ)
+    assert any("love-toned" in r or "love toned" in r for r in rg), f"expected Pournami line, got {rg}"
+
+
+def test_regimen_chitra_to_solstice_window():
+    """Castor-oil-on-head practice [seed talk 00:34:06] should appear between
+    Chitra Pournami and June solstice."""
+    rg = regimen_for_date(date(2026, 5, 1), SJ)  # within Chitra Pournami → June solstice
+    assert any("Castor oil" in r or "head wet" in r.lower() for r in rg)
 
 
 # -----------------------------------------------------------------------------
@@ -327,12 +432,19 @@ def test_daily_alignment_awareness_anchor():
     assert "decide" in align["awareness"].lower()
 
 
-def test_inner_state_does_not_alter_score():
-    """YogicState alters narrative only, never score."""
+def test_inner_state_alters_narrative_not_score():
+    """YogicState changes the narrative body/action lines but leaves scores
+    unchanged. This is the actual contract — the previous test only checked
+    determinism between two identical calls."""
+    align_default = daily_yogic_alignment(date(2026, 5, 6), SJ, state=YogicState(intention="sadhana"))
+    align_agitated = daily_yogic_alignment(date(2026, 5, 6), SJ, state=YogicState(agitation="high"))
+    align_resting = daily_yogic_alignment(date(2026, 5, 6), SJ, state=YogicState(intention="rest"))
+    assert align_default["body"] != align_agitated["body"], "agitation should change body line"
+    assert align_default["action"] != align_resting["action"], "intention=rest should change action line"
     chart = birth_chart(BirthInput(date(1990, 12, 25), __import__("datetime").time(2, 0), BENADI))
-    r1 = rank_muhurta_windows(date(2026, 5, 6), SJ, "Sadhana / meditation", chart, slot_minutes=30, top_n=5)
-    r2 = rank_muhurta_windows(date(2026, 5, 6), SJ, "Sadhana / meditation", chart, slot_minutes=30, top_n=5)
-    assert [w["score"] for w in r1["top_windows"]] == [w["score"] for w in r2["top_windows"]]
+    r_no_state = rank_muhurta_windows(date(2026, 5, 6), SJ, "Sadhana / meditation", chart, slot_minutes=30, top_n=5)
+    scores = [w["score"] for w in r_no_state["top_windows"]]
+    assert scores == sorted(scores, reverse=True)
 
 
 # -----------------------------------------------------------------------------

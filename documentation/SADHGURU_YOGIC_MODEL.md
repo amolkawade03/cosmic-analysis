@@ -114,7 +114,7 @@ the language of the source.
 | Amavasya | Tithi index = 30 | "If you are seeking liberation, Amavasya is sacred" — same URL |
 | Ekadashi (each paksha) | Tithi index = 11 (Shukla) or 26 (Krishna) | "Fasting twice a month on Ekadashi days is the best way to do it" — Isha "Ekadashi" article |
 | Pradosham | Trayodashi (T13/T28) ±90 min around sunset | NEUTRAL — general Shaiva tradition; NOT a primary Sadhguru emphasis. Surfaced because Sandhya overlap is Sadhguru-endorsed |
-| Mahashivaratri | Krishna Chaturdashi with Sun in tropical Aquarius | Flagship Sadhguru night; "natural upsurge of energy in a human being" — Isha Mahashivratri page |
+| Mahashivaratri | Phalguna Krishna Chaturdashi spanning Nishita, Sun in sidereal Kumbha | Flagship Sadhguru night; "natural upsurge of energy in a human being" — Isha Mahashivratri page |
 | Guru Pournima | First Pournami after June solstice | "On the first full moon after the summer solstice, [Adiyogi] decided to teach" — Isha "Story of Guru Purnima" |
 | Buddha Pournima | 3rd Pournami after Uttarayana begins (i.e. after Dec solstice; ~ Vaishakha Pournima) | "The third purnima after the earth shifts to the northern run of the sun" — Isha "Buddha Pournami" |
 | Naga Panchami | Shukla Panchami in Shravana (Sun in tropical Cancer/Leo, Moon ~Hasta-Chitra) | "Significant for those who want to penetrate and know life beyond their physicality" — Isha "Naga Panchami" |
@@ -457,10 +457,10 @@ ground-truth date. Notable anchors:
   - Karka Sankranti: ~2026-07-16
 - **Mahashivaratri 2026**: 2026-02-15 (Krishna Chaturdashi, Sun in
   tropical Aquarius)
-- **Guru Pournima 2026**: First Pournami after June 21 solstice =
-  2026-06-29 (Pournami in Jyeshtha; or 2026-07-29 — TBD by computation)
-- **Buddha Pournima 2026**: Third Pournami after Dec 21 2025 solstice =
-  2026-04-01 (Vaishakha Pournima; the "3rd Pournima after Uttarayana")
+- **Guru Pournima 2026**: 2026-07-29 (Ashadha Pournima — Pournima following
+  the Amavasya in sidereal Mithuna)
+- **Buddha Pournima 2026**: 2026-05-01 (Vaishakha Pournima — Pournima
+  following the Amavasya in sidereal Mesha)
 - **Naga Panchami 2026**: Shukla Panchami in Shravana masa
   (Jul-Aug 2026)
 - **Anti-fatalism gate**: a Mahashivaratri at sunset with overlapping

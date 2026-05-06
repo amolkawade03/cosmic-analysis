@@ -28,6 +28,16 @@ class Location:
     longitude: float
     timezone: str
 
+    def __post_init__(self) -> None:
+        if not -90.0 <= self.latitude <= 90.0:
+            raise ValueError(f"Location.latitude must be in [-90, 90], got {self.latitude}")
+        if not -180.0 <= self.longitude <= 180.0:
+            raise ValueError(f"Location.longitude must be in [-180, 180], got {self.longitude}")
+        try:
+            ZoneInfo(self.timezone)
+        except Exception as exc:
+            raise ValueError(f"Location.timezone is not a valid IANA tz: {self.timezone!r}") from exc
+
 
 @dataclass
 class BirthInput:
@@ -35,6 +45,12 @@ class BirthInput:
     time: time
     location: Location
     ayanamsha: str = "Lahiri"
+
+    def __post_init__(self) -> None:
+        if self.ayanamsha not in AYANAMSHA:
+            raise ValueError(f"BirthInput.ayanamsha must be one of {set(AYANAMSHA)}, got {self.ayanamsha!r}")
+        if self.date.year < 1800 or self.date.year > 2400:
+            raise ValueError(f"BirthInput.date.year must be in [1800, 2400] for swisseph accuracy, got {self.date.year}")
 
 
 @dataclass
@@ -74,8 +90,20 @@ def rashi(lon: float) -> str:
     return RASHIS[int(lon // 30)]
 
 
+import warnings as _warnings
+
+
 def noaa_sunrise_sunset(d: date, loc: Location, zenith: float = 90.833) -> Tuple[datetime, datetime]:
-    """Civil sunrise/sunset approximation. Replace with swe.rise_trans for stricter almanac work."""
+    """Civil sunrise/sunset approximation, accurate to ~1-3 minutes at temperate
+    latitudes. Replace with swe.rise_trans for stricter almanac work.
+
+    Polar latitudes (|lat| > ~66.5°) on midnight-sun / polar-night dates trigger
+    a fallback to 06:00 / 18:00 local time AND emit a UserWarning so callers
+    know the output is fictitious. Downstream sandhya / Brahma Muhurta windows
+    based on this fallback are not meaningful.
+    """
+    polar_fallback_used = [False]
+
     def calc(is_rise: bool) -> datetime:
         n = d.timetuple().tm_yday
         lng_hour = loc.longitude / 15.0
@@ -88,6 +116,7 @@ def noaa_sunrise_sunset(d: date, loc: Location, zenith: float = 90.833) -> Tuple
         cos_dec = cos(asin(sin_dec))
         cos_h = (cos(radians(zenith)) - sin_dec * sin(radians(loc.latitude))) / (cos_dec * cos(radians(loc.latitude)))
         if cos_h > 1 or cos_h < -1:
+            polar_fallback_used[0] = True
             return datetime.combine(d, time(6 if is_rise else 18), ZoneInfo(loc.timezone))
         h = (360 - degrees(acos(cos_h)) if is_rise else degrees(acos(cos_h))) / 15
         ut = (h + ra - 0.06571 * t - 6.622 - lng_hour) % 24
@@ -97,7 +126,16 @@ def noaa_sunrise_sunset(d: date, loc: Location, zenith: float = 90.833) -> Tuple
         if (not is_rise) and local.date() < d:
             local += timedelta(days=1)
         return local
-    return calc(True), calc(False)
+    rise, sett = calc(True), calc(False)
+    if polar_fallback_used[0]:
+        _warnings.warn(
+            f"noaa_sunrise_sunset: polar fallback (|lat|={abs(loc.latitude):.1f}°) at {loc.name} "
+            f"on {d.isoformat()} — returned 06:00/18:00 are placeholders, not real sun events. "
+            "Downstream sandhya / Brahma Muhurta windows are not meaningful at this lat/date.",
+            UserWarning,
+            stacklevel=2,
+        )
+    return rise, sett
 
 
 def tithi_info(moon: float, sun: float) -> Dict[str, Any]:
@@ -248,13 +286,19 @@ def birth_chart(inp: BirthInput) -> Dict[str, Any]:
     return {"birth_datetime": dt.isoformat(), "location": asdict(inp.location), "janma_nakshatra": nakshatra_info(moon), "janma_rashi": rashi(moon), "janma_rashi_index": int(moon // 30) + 1, "lagna": lagna, "planets": planets}
 
 
+# `friction_windows` annotates which windows historically appear in classical
+# muhurta as "avoid" — but in this engine they are NEVER penalised. They are
+# surfaced as `notes` on overlapping slots so the user can bring awareness, per
+# Sadhguru's stated stance ("respond, not react", seed talk [00:13:58]). The
+# old `avoid_windows` key was deprecated to remove fatalist semantics from the
+# canonical profile dict.
 ACTIVITY_PROFILES = {
-    "Sadhana / meditation": {"prefer_windows": ["Brahma Muhurta", "Sunrise Sandhya", "Sunset Sandhya"], "avoid_windows": [], "boost_nak": ["Pushya", "Hasta", "Revati", "Shravana", "Anuradha"], "weight_personal": 1.0},
-    "Deep work / study": {"prefer_windows": ["Abhijit Muhurta"], "avoid_windows": ["Rahu Kala", "Yamaganda"], "boost_nak": ["Rohini", "Mrigashirsha", "Hasta", "Shravana", "Revati"], "weight_personal": 0.8},
-    "Investment / finance": {"prefer_windows": ["Abhijit Muhurta"], "avoid_windows": ["Rahu Kala", "Yamaganda", "Gulika Kala"], "boost_nak": ["Rohini", "Uttara Phalguni", "Uttara Ashadha", "Uttara Bhadrapada", "Revati"], "weight_personal": 1.2},
-    "Travel": {"prefer_windows": [], "avoid_windows": ["Rahu Kala", "Yamaganda"], "boost_nak": ["Ashwini", "Mrigashirsha", "Punarvasu", "Hasta", "Anuradha", "Revati"], "weight_personal": 1.0},
-    "Ceremony / auspicious start": {"prefer_windows": ["Abhijit Muhurta"], "avoid_windows": ["Rahu Kala", "Yamaganda", "Gulika Kala"], "boost_nak": ["Rohini", "Mrigashirsha", "Uttara Phalguni", "Hasta", "Swati", "Anuradha", "Revati"], "weight_personal": 1.4},
-    "Health / body reset": {"prefer_windows": ["Brahma Muhurta", "Sunrise Sandhya"], "avoid_windows": [], "boost_nak": ["Ashwini", "Pushya", "Hasta", "Shravana"], "weight_personal": 0.8},
+    "Sadhana / meditation": {"prefer_windows": ["Brahma Muhurta", "Sunrise Sandhya", "Sunset Sandhya", "Madhyahna Sandhya"], "friction_windows": [], "boost_nak": ["Pushya", "Hasta", "Revati", "Shravana", "Anuradha"], "weight_personal": 1.0},
+    "Deep work / study": {"prefer_windows": ["Abhijit Muhurta"], "friction_windows": ["Rahu Kala", "Yamaganda"], "boost_nak": ["Rohini", "Mrigashirsha", "Hasta", "Shravana", "Revati"], "weight_personal": 0.8},
+    "Investment / finance": {"prefer_windows": ["Abhijit Muhurta"], "friction_windows": ["Rahu Kala", "Yamaganda", "Gulika Kala"], "boost_nak": ["Rohini", "Uttara Phalguni", "Uttara Ashadha", "Uttara Bhadrapada", "Revati"], "weight_personal": 1.2},
+    "Travel": {"prefer_windows": [], "friction_windows": ["Rahu Kala", "Yamaganda"], "boost_nak": ["Ashwini", "Mrigashirsha", "Punarvasu", "Hasta", "Anuradha", "Revati"], "weight_personal": 1.0},
+    "Ceremony / auspicious start": {"prefer_windows": ["Abhijit Muhurta"], "friction_windows": ["Rahu Kala", "Yamaganda", "Gulika Kala"], "boost_nak": ["Rohini", "Mrigashirsha", "Uttara Phalguni", "Hasta", "Swati", "Anuradha", "Revati"], "weight_personal": 1.4},
+    "Health / body reset": {"prefer_windows": ["Brahma Muhurta", "Sunrise Sandhya"], "friction_windows": [], "boost_nak": ["Ashwini", "Pushya", "Hasta", "Shravana"], "weight_personal": 0.8},
 }
 
 

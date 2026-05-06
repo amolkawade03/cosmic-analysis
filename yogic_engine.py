@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
+from functools import lru_cache
 from math import exp, pi, sin
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -35,6 +36,26 @@ from cosmic_engine import (
     to_jd_utc,
     tropical_sun_longitude,
 )
+
+
+# -----------------------------------------------------------------------------
+# Hindu-calendar reference sampling
+# -----------------------------------------------------------------------------
+#
+# Hindu festivals are calendar events tied to lunar/solar geometry; the canonical
+# date is the Indian Standard Time (IST) date where the relevant tithi was active
+# at sunrise. drikpanchang.com uses this convention. For a user in San Jose, the
+# festival "date" should be the IST date — even if the user's local-clock
+# observance starts the prior evening — so that the engine matches the global
+# yogic event Isha publishes.
+#
+# `_INDIA_REF` is the location used for festival-date sampling regardless of the
+# user's location. Coimbatore (11°N) is chosen because (a) it's Isha Yoga Center,
+# (b) it lies at Sadhguru's stated peak-centrifugal-force latitude, and (c) it
+# uses Asia/Kolkata timezone like all of India. The user's `Location` argument
+# is preserved in detect_festivals etc. for sandhya/sunrise-overlap purposes.
+
+_INDIA_REF = Location("Coimbatore (Hindu-calendar reference)", 11.0168, 76.9558, "Asia/Kolkata")
 
 
 # -----------------------------------------------------------------------------
@@ -73,6 +94,7 @@ def _sun_tropical_lon_at(dt: datetime) -> float:
     return normalize(swe.calc_ut(to_jd_utc(dt), swe.SUN, swe.FLG_SWIEPH)[0][0])
 
 
+@lru_cache(maxsize=512)
 def find_equinox_solstice(year: int, kind: str, tz: str = "UTC") -> date:
     """Find the date (in given tz) of the named astronomical equinox/solstice.
 
@@ -144,6 +166,7 @@ _RASHI_NAMES = [
 ]
 
 
+@lru_cache(maxsize=512)
 def find_sankranti(year: int, rashi_idx: int, ayanamsha: str = "Lahiri", tz: str = "UTC") -> date:
     """Date Sun crosses 0° of the named sidereal rashi in the given Gregorian year.
 
@@ -167,16 +190,21 @@ def find_sankranti(year: int, rashi_idx: int, ayanamsha: str = "Lahiri", tz: str
     return lo.astimezone(ZoneInfo(tz)).date()
 
 
-def sankrantis_for_year(year: int, ayanamsha: str = "Lahiri", tz: str = "UTC") -> List[Tuple[date, str]]:
-    """All 12 sidereal Sankrantis for the given Gregorian year."""
-    out = []
+@lru_cache(maxsize=128)
+def _sankrantis_for_year_cached(year: int, ayanamsha: str, tz: str) -> Tuple[Tuple[date, str], ...]:
+    out: List[Tuple[date, str]] = []
     for idx, name in enumerate(_RASHI_NAMES):
         try:
             out.append((find_sankranti(year, idx, ayanamsha, tz), f"{name} Sankranti"))
         except Exception:
             pass
     out.sort()
-    return out
+    return tuple(out)
+
+
+def sankrantis_for_year(year: int, ayanamsha: str = "Lahiri", tz: str = "UTC") -> List[Tuple[date, str]]:
+    """All 12 sidereal Sankrantis for the given Gregorian year. Cached."""
+    return list(_sankrantis_for_year_cached(year, ayanamsha, tz))
 
 
 # -----------------------------------------------------------------------------
@@ -215,111 +243,230 @@ def lunar_intensity(panchangam: PanchangamDay) -> Dict[str, str]:
             "note": "Krishna paksha — releasing energy"}
 
 
-def _is_pournima_for_year(d: date, panchangam: PanchangamDay) -> bool:
-    return panchangam.tithi["index"] == 15
+def _scan_pournimas(start: date, end: date, ayanamsha: str = "Lahiri") -> List[Tuple[date, PanchangamDay]]:
+    """All Pournima dates in a range, sampled at IST sunrise (Hindu-calendar reference).
 
-
-def _moon_nakshatra_idx(panchangam: PanchangamDay) -> int:
-    return panchangam.nakshatra["index"] - 1  # convert 1-based to 0-based
-
-
-def _find_pournimas(start: date, end: date, loc: Location, ayanamsha: str = "Lahiri") -> List[Tuple[date, PanchangamDay]]:
-    """Scan a date range and return all dates where tithi index is 15."""
+    drikpanchang and the Hindu calendar tradition determine festival dates by the
+    tithi active at IST sunrise. This function uses Coimbatore (Asia/Kolkata) as
+    the reference location for festival-date detection regardless of where the
+    user is.
+    """
     out = []
     d = start
     while d <= end:
-        p = panchangam_for_date(d, loc, ayanamsha)
+        p = _panchangam_at_india_ref(d, ayanamsha)
         if p.tithi["index"] == 15:
             out.append((d, p))
         d += timedelta(days=1)
     return out
 
 
-def find_mahashivaratri(year: int, loc: Location, ayanamsha: str = "Lahiri") -> Optional[date]:
-    """Krishna Chaturdashi (T29) when Sun is in sidereal Kumbha.
+def _scan_amavasyas(start: date, end: date, ayanamsha: str = "Lahiri") -> List[Tuple[date, PanchangamDay]]:
+    out = []
+    d = start
+    while d <= end:
+        p = _panchangam_at_india_ref(d, ayanamsha)
+        if p.tithi["index"] == 30:
+            out.append((d, p))
+        d += timedelta(days=1)
+    return out
 
-    Traditional rule: Phalguna Krishna Chaturdashi. Detection: scan Feb-March
-    for T29 with Sun's sidereal longitude in [300°, 330°) (Kumbha). Returns
-    None if no match (extremely rare).
+
+def _panchangam_at_india_ref(d: date, ayanamsha: str = "Lahiri") -> PanchangamDay:
+    """Panchangam sampled at IST sunrise (Coimbatore reference). Cached per
+    (date, ayanamsha) — `_INDIA_REF` location is a module constant."""
+    return _panchangam_india_ref_cached(d.toordinal(), ayanamsha)
+
+
+@lru_cache(maxsize=4096)
+def _panchangam_india_ref_cached(ordinal: int, ayanamsha: str) -> PanchangamDay:
+    return panchangam_for_date(date.fromordinal(ordinal), _INDIA_REF, ayanamsha)
+
+
+def _tithi_active_during_day(d: date, target_tithi: int, ayanamsha: str = "Lahiri") -> bool:
+    """Check if the target tithi was active at IST sunrise of either d or d-1.
+
+    Festivals like Mahashivaratri use the rule "tithi spans the night" (Nishita
+    rule). Sampling at a single sunrise can miss the tithi entirely if it falls
+    between two sunrises. This helper checks both d and d-1 IST sunrise.
     """
-    d = date(year, 2, 1)
+    p_today = _panchangam_at_india_ref(d, ayanamsha)
+    if p_today.tithi["index"] == target_tithi:
+        return True
+    p_yest = _panchangam_at_india_ref(d - timedelta(days=1), ayanamsha)
+    if p_yest.tithi["index"] == target_tithi:
+        return True
+    return False
+
+
+@lru_cache(maxsize=512)
+def find_mahashivaratri(year: int, loc_name: Optional[str] = None, ayanamsha: str = "Lahiri") -> Optional[date]:
+    """Phalguna Krishna Chaturdashi (T29) — Nishita-spanning rule.
+
+    Classical rule: Mahashivaratri is observed on the day d when T29 (Krishna
+    Chaturdashi) spans Nishita (~midnight of d, in IST). drikpanchang uses
+    this rule, which is why Mahashivaratri is published as the day BEFORE
+    T29 appears at IST sunrise — T29 spans the preceding night.
+
+    Detection: scan for the day d where the next IST sunrise (d+1) sees T29
+    active. That means T29 was active during d's night, including Nishita.
+    The Sun-in-Kumbha (sidereal 300-330°) constraint disambiguates from any
+    other T29 in the year.
+
+    Verified against drikpanchang 2024-2028 to ±1 day (boundary years where
+    T29 starts very close to midnight may differ by 1 day across sources).
+    """
+    d = date(year, 1, 25)
     end = date(year, 3, 31)
     while d <= end:
-        p = panchangam_for_date(d, loc, ayanamsha)
-        if p.tithi["index"] == 29:
-            sun_lon = sidereal_sun_longitude(d, loc, ayanamsha)
+        p_next = _panchangam_at_india_ref(d + timedelta(days=1), ayanamsha)
+        if p_next.tithi["index"] == 29:
+            sun_lon = sidereal_sun_longitude(d, _INDIA_REF, ayanamsha)
             if 300.0 <= sun_lon < 330.0:
                 return d
         d += timedelta(days=1)
     return None
 
 
-def find_guru_pournima(year: int, loc: Location, ayanamsha: str = "Lahiri") -> Optional[date]:
-    """Ashadha Pournima — Pournima with Moon in Purva Ashadha or Uttara Ashadha
-    nakshatra. This is the canonical anchor: the Hindu lunar month of Ashadha
-    is named after this nakshatra pair.
+@lru_cache(maxsize=512)
+def find_guru_pournima(year: int, loc_name: Optional[str] = None, ayanamsha: str = "Lahiri") -> Optional[date]:
+    """Ashadha Pournima — the Pournima following an Amavasya in sidereal Mithuna.
+
+    Ashadha lunar month (Amanta convention) starts after the Amavasya occurring
+    while Sun is in Mithuna (Gemini, sidereal 60-90°). Guru Pournima is the
+    Pournima within that lunar month. This anchor is robust to year-edge cases
+    where Moon at Ashadha Pournima is in Mula (just before Purva Ashadha) or
+    Shravana (just after Uttara Ashadha) — e.g. 2028.
 
     Per Isha 'Story of Guru Purnima': "On the first full moon after the summer
-    solstice, [Adiyogi] decided to teach." In years where the Ashadha Pournima
-    falls just before the June solstice (rare), this is the next such Pournima.
+    solstice, [Adiyogi] decided to teach." Verified against drikpanchang
+    2024-2028.
     """
-    pms = _find_pournimas(date(year, 6, 15), date(year, 8, 5), loc, ayanamsha)
-    for d, p in pms:
-        if p.nakshatra["name"] in ("Purva Ashadha", "Uttara Ashadha"):
-            return d
-    for d, p in pms:
-        sun_lon = sidereal_sun_longitude(d, loc, ayanamsha)
-        if 90.0 <= sun_lon < 120.0:
-            return d
-    return None
+    amavs = _scan_amavasyas(date(year, 5, 25), date(year, 7, 25), ayanamsha)
+    mithuna_amavs = []
+    for d, _ in amavs:
+        sun_lon = sidereal_sun_longitude(d, _INDIA_REF, ayanamsha)
+        if 60.0 <= sun_lon < 90.0:
+            mithuna_amavs.append(d)
+    if not mithuna_amavs:
+        return None
+    am = mithuna_amavs[-1]
+    pms = _scan_pournimas(am + timedelta(days=10), am + timedelta(days=20), ayanamsha)
+    return pms[0][0] if pms else None
 
 
-def find_buddha_pournima(year: int, loc: Location, ayanamsha: str = "Lahiri") -> Optional[date]:
-    """Vaishakha Pournima — Pournima with Sun in sidereal Mesha (rashi 0).
+@lru_cache(maxsize=512)
+def find_buddha_pournima(year: int, loc_name: Optional[str] = None, ayanamsha: str = "Lahiri") -> Optional[date]:
+    """Vaishakha Pournima — the Pournima following an Amavasya in sidereal Mesha.
 
-    The Isha article frames this as "third purnima after the earth shifts to
-    the northern run of the sun"; the unambiguous astronomical anchor is
-    Vaishakha Pournima = Pournima with Sun in Mesha (Aries). For 2026 this
-    is May 1.
+    Vaishakha lunar month (Amanta convention) starts after the Amavasya that
+    occurs while Sun is in Mesha (Aries). Buddha Pournima is the Pournima
+    within that lunar month. This is more robust than 'first Pournima with Sun
+    in Mesha', which fails in years (2024, 2027) where Chaitra Pournima also
+    has Sun in Mesha — the older rule picked Chaitra Pournima ~30 days too
+    early.
+
+    Verified against drikpanchang for 2024-2028.
     """
-    pms = _find_pournimas(date(year, 4, 5), date(year, 5, 25), loc, ayanamsha)
-    for d, _ in pms:
-        sun_lon = sidereal_sun_longitude(d, loc, ayanamsha)
+    amavs = _scan_amavasyas(date(year, 3, 15), date(year, 5, 20), ayanamsha)
+    mesha_amavs = []
+    for d, _ in amavs:
+        sun_lon = sidereal_sun_longitude(d, _INDIA_REF, ayanamsha)
         if 0.0 <= sun_lon < 30.0:
+            mesha_amavs.append(d)
+    if not mesha_amavs:
+        return None
+    am = mesha_amavs[-1]
+    pms = _scan_pournimas(am + timedelta(days=10), am + timedelta(days=20), ayanamsha)
+    return pms[0][0] if pms else None
+
+
+@lru_cache(maxsize=512)
+def find_naga_panchami(year: int, loc_name: Optional[str] = None, ayanamsha: str = "Lahiri") -> Optional[date]:
+    """Shravana Shukla Panchami — fifth tithi of the Shukla paksha that begins
+    after the Amavasya occurring while Sun is in sidereal Karka (Cancer).
+
+    Shravana lunar month (Amanta) starts after the Amavasya whose Sun is in
+    Karka. Naga Panchami is tithi 5 of that month's Shukla paksha. Anchoring
+    on the Karka-Amavasya is robust to Adhika Masa (intercalary lunar month)
+    edge cases that broke the older "second Shukla Panchami after solstice"
+    heuristic.
+
+    Verified against drikpanchang for 2024-2028.
+    """
+    amavs = _scan_amavasyas(date(year, 6, 25), date(year, 8, 25), ayanamsha)
+    karka_amavs = []
+    for d, _ in amavs:
+        sun_lon = sidereal_sun_longitude(d, _INDIA_REF, ayanamsha)
+        if 90.0 <= sun_lon < 120.0:
+            karka_amavs.append(d)
+    if not karka_amavs:
+        return None
+    am = karka_amavs[-1]
+    d = am + timedelta(days=4)
+    end = am + timedelta(days=8)
+    while d <= end:
+        p = _panchangam_at_india_ref(d, ayanamsha)
+        if p.tithi["index"] == 5 and p.paksha == "Shukla":
             return d
+        d += timedelta(days=1)
     return None
 
 
-def find_naga_panchami(year: int, loc: Location, ayanamsha: str = "Lahiri") -> Optional[date]:
-    """Shravana Shukla Panchami.
-
-    Detection: the second Shukla Panchami after the June solstice (the first
-    one is Ashadha Shukla Panchami, the second is Shravana Shukla Panchami).
-    Equivalent astronomical anchor: tithi 5 shukla in the lunar month
-    following Ashadha Pournima.
-    """
-    js = find_equinox_solstice(year, "June solstice", loc.timezone)
-    d = js
-    end = date(year, 9, 5)
-    found = []
-    while d <= end:
-        p = panchangam_for_date(d, loc, ayanamsha)
-        if p.tithi["index"] == 5 and p.paksha == "Shukla":
-            found.append(d)
-        d += timedelta(days=1)
-    return found[1] if len(found) >= 2 else (found[0] if found else None)
-
-
-def margali_window(year: int, loc: Location, ayanamsha: str = "Lahiri") -> Tuple[date, date]:
+@lru_cache(maxsize=128)
+def margali_window(year: int, loc_name: Optional[str] = None, ayanamsha: str = "Lahiri") -> Tuple[date, date]:
     """Margali masa = Sun in sidereal Dhanu (Sagittarius, rashi 8).
 
     Per seed talk [00:39:10]: 'Tamil month of Margali starts on 16th December
     towards the end of Dakshinayana ... cold water dip before sunrise at
     Brahma Muhurtam ... do this for a whole mandela or a period of 40 to 48
     days.' Returns (Margali start, Margali start + 48 days mandala end).
+    The IST timezone reference is used for the Sankranti boundary.
     """
-    start = find_sankranti(year - 1, 8, ayanamsha, loc.timezone)
+    start = find_sankranti(year - 1, 8, ayanamsha, "Asia/Kolkata")
     return start, start + timedelta(days=48)
+
+
+# Backward-compatible signature wrappers for callers that pass a Location.
+# Festival dates are global (sampled at IST sunrise), so the location is
+# only used for sandhya/sunrise overlap downstream — not for the date itself.
+def _norm_loc_arg(arg: Any) -> Optional[str]:
+    if arg is None or isinstance(arg, str):
+        return arg
+    if isinstance(arg, Location):
+        return arg.name
+    return None
+
+
+_orig_find_mahashivaratri = find_mahashivaratri
+_orig_find_guru_pournima = find_guru_pournima
+_orig_find_buddha_pournima = find_buddha_pournima
+_orig_find_naga_panchami = find_naga_panchami
+_orig_margali_window = margali_window
+
+
+def find_mahashivaratri(year: int, loc: Any = None, ayanamsha: str = "Lahiri") -> Optional[date]:  # type: ignore[no-redef]
+    return _orig_find_mahashivaratri(year, _norm_loc_arg(loc), ayanamsha)
+
+
+def find_guru_pournima(year: int, loc: Any = None, ayanamsha: str = "Lahiri") -> Optional[date]:  # type: ignore[no-redef]
+    return _orig_find_guru_pournima(year, _norm_loc_arg(loc), ayanamsha)
+
+
+def find_buddha_pournima(year: int, loc: Any = None, ayanamsha: str = "Lahiri") -> Optional[date]:  # type: ignore[no-redef]
+    return _orig_find_buddha_pournima(year, _norm_loc_arg(loc), ayanamsha)
+
+
+def find_naga_panchami(year: int, loc: Any = None, ayanamsha: str = "Lahiri") -> Optional[date]:  # type: ignore[no-redef]
+    return _orig_find_naga_panchami(year, _norm_loc_arg(loc), ayanamsha)
+
+
+def margali_window(year: int, loc: Any = None, ayanamsha: str = "Lahiri") -> Tuple[date, date]:  # type: ignore[no-redef]
+    return _orig_margali_window(year, _norm_loc_arg(loc), ayanamsha)
+
+
+# Keep _find_pournimas as a compatibility alias for any external caller.
+_find_pournimas = lambda start, end, loc, ayanamsha="Lahiri": _scan_pournimas(start, end, ayanamsha)
 
 
 def detect_festivals(d: date, loc: Location, ayanamsha: str = "Lahiri") -> List[Dict[str, str]]:
@@ -362,8 +509,8 @@ def detect_festivals(d: date, loc: Location, ayanamsha: str = "Lahiri") -> List[
         events.append({
             "name": "Mahashivaratri",
             "type": "lunar+solar",
-            "rule": "Krishna Chaturdashi with Sun in sidereal Kumbha",
-            "note": "Natural upsurge of energy; spine-vertical all night; 11°N latitude is peak.",
+            "rule": "Phalguna Krishna Chaturdashi (Nishita-spanning), Sun in sidereal Kumbha",
+            "note": "Natural upsurge of energy; spine-vertical all night; |lat|=11° is peak.",
         })
 
     gpm = find_guru_pournima(d.year, loc, ayanamsha)
@@ -371,7 +518,7 @@ def detect_festivals(d: date, loc: Location, ayanamsha: str = "Lahiri") -> List[
         events.append({
             "name": "Guru Pournima",
             "type": "lunar+solar",
-            "rule": "First Pournami after June solstice",
+            "rule": "Ashadha Pournima — Pournima following an Amavasya in sidereal Mithuna",
             "note": "Adi Yogi turned south to teach; day to earn grace.",
         })
 
@@ -380,7 +527,7 @@ def detect_festivals(d: date, loc: Location, ayanamsha: str = "Lahiri") -> List[
         events.append({
             "name": "Buddha Pournima",
             "type": "lunar+solar",
-            "rule": "3rd Pournami after Makara Sankranti",
+            "rule": "Vaishakha Pournima — Pournima following an Amavasya in sidereal Mesha",
             "note": "Significant for any spiritual aspirant (Isha: 'Buddha Pournami').",
         })
 
@@ -423,20 +570,21 @@ def detect_festivals(d: date, loc: Location, ayanamsha: str = "Lahiri") -> List[
 
 def latitude_intensity(latitude: float, kind: str) -> float:
     """0.0-to-1.0 scalar describing how strongly a Sadhguru-stated geometric
-    effect manifests at the given latitude.
+    effect manifests at the given latitude. Hemisphere-symmetric — the
+    centrifugal-force claim is by latitude magnitude, not by sign.
 
-    kind = 'mahashivaratri': 1.0 at 11°N (Isha Yoga Center latitude),
-        attenuated by Gaussian with sigma 15°. Sadhguru's claim:
-        "maximum amount of centrifugal force happens at approximately
-        eleven degrees latitude."
+    kind = 'mahashivaratri': 1.0 at |lat|=11° (Isha Yoga Center latitude band),
+        attenuated by Gaussian with sigma 15° on |lat|. Sadhguru's claim
+        (Isha encyclopedia, secondary source): "maximum amount of centrifugal
+        force happens at approximately eleven degrees latitude."
 
-    kind = 'equinox_envelope': flat 1.0 inside 23-33°N, 0.6 outside.
-        Sadhguru's claim: "particularly between 23 to 33 degree latitude
-        this effect will be at its highest."
+    kind = 'equinox_envelope': flat 1.0 inside |lat| in [23, 33]°, 0.6 outside.
+        Sadhguru's claim (seed talk [00:23:16]): "particularly between 23 to 33
+        degree latitude this effect will be at its highest."
     """
     if kind == "mahashivaratri":
         sigma = 15.0
-        return float(exp(-((latitude - 11.0) ** 2) / (2 * sigma ** 2)))
+        return float(exp(-((abs(latitude) - 11.0) ** 2) / (2 * sigma ** 2)))
     if kind == "equinox_envelope":
         return 1.0 if 23.0 <= abs(latitude) <= 33.0 else 0.6
     return 1.0
@@ -458,13 +606,16 @@ def regimen_for_date(d: date, loc: Location, ayanamsha: str = "Lahiri") -> List[
     sun_lon = sidereal_sun_longitude(d, loc, ayanamsha)
     eqs = equinox_solstice_proximity(d, loc.timezone)
 
-    # Castor oil / wet head between Chitra Pournami and June solstice
-    chitra_pm = None
-    for pm_d, pm_p in _find_pournimas(date(d.year, 3, 25), date(d.year, 5, 15), loc, ayanamsha):
-        if pm_p.nakshatra["name"] == "Chitra":
-            chitra_pm = pm_d
-            break
+    # Castor oil / wet head between Chitra Pournami and June solstice.
+    # Chitra Pournami / Chaitra Pournima = first Pournima after the March
+    # equinox (the lunar month name "Chaitra" derives from Chitra nakshatra,
+    # but in practice the Pournima Moon may be in adjacent Hasta/Swati;
+    # drikpanchang-published Chitra Pournami matches "first Pournima after
+    # March equinox" for the years 2024-2028).
+    me = find_equinox_solstice(d.year, "March equinox", loc.timezone)
     js = find_equinox_solstice(d.year, "June solstice", loc.timezone)
+    chitra_pms = _scan_pournimas(me + timedelta(days=1), me + timedelta(days=32), ayanamsha)
+    chitra_pm = chitra_pms[0][0] if chitra_pms else None
     if chitra_pm and chitra_pm <= d <= js:
         out.append("Castor oil on top of head before going out (or keep top of head wet) — through summer solstice. [seed talk 00:34:06]")
 
